@@ -2,9 +2,12 @@ name: Build V16 ReShade tuning mode
 
 on:
   push:
-    branches: [reshade-overlay-fix]
+    branches:
+      - reshade-overlay-fix
     paths:
       - '.github/workflows/build-v16-reshade-tuning.yml'
+      - 'experiments/v16/**'
+      - 'source/WH3-native-DLSS5-XeFG.patch'
   workflow_dispatch:
 
 permissions:
@@ -17,187 +20,12 @@ jobs:
       - name: Checkout experiment branch
         uses: actions/checkout@v4
 
-      - name: Clone tested OptiScaler base
-        shell: powershell
-        run: |
-          git clone --recursive https://github.com/optiscaler/OptiScaler.git optiscaler-src
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Set-Location optiscaler-src
-          git checkout 5c5e424dd137d69ef36c4231fd45b760b4c65cc8
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git submodule update --init --recursive
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Apply validated V15 RC1 patch
-        shell: powershell
-        run: |
-          @'
-          from pathlib import Path
-          src = Path('source/WH3-native-DLSS5-XeFG.patch').read_text(encoding='utf-8-sig')
-          Path('v15.patch').write_text(src, encoding='utf-8')
-          '@ | Set-Content -Encoding UTF8 apply_v15.py
-          python apply_v15.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Set-Location optiscaler-src
-          git apply --recount ..\v15.patch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Apply V16 ReShade tuning experiment
-        shell: powershell
-        run: |
-          @'
-          from pathlib import Path
-
-          p = Path('optiscaler-src/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp')
-          s = p.read_text(encoding='utf-8')
-
-          old = 'static int scCount = 0;\n'
-          new = '''static int scCount = 0;
-
-// WH3 V16 experiment: when ReShade's Home key is pressed, temporarily present the
-// original DX11 swapchain instead of the XeFG DX12 presenter. This lets the already
-// loaded ReShade runtime compose its own overlay without creating a second runtime.
-// The validated V15 XeFG path is untouched while this mode is off.
-static bool wh3ReShadeTuningMode = false;
-static bool wh3ReShadeRestoreFg = false;
-static bool wh3ReShadeHomeWasDown = false;
-static bool wh3ReShadeResumeAfterPresent = false;
-'''
-          if old not in s:
-              raise SystemExit('V16 global insertion anchor missing')
-          s = s.replace(old, new, 1)
-
-          old = '''    if ((Flags & DXGI_PRESENT_TEST) != 0)
-        return _real->Present(SyncInterval, Flags);
-
-    if (!_InitInteropObjects())
-        return DXGI_ERROR_DEVICE_REMOVED;
-'''
-          new = '''    if ((Flags & DXGI_PRESENT_TEST) != 0)
-        return _real->Present(SyncInterval, Flags);
-
-    // WH3 ReShade tuning mode.
-    // ReShade is attached to the original DX11 swapchain. In the normal XeFG path
-    // OptiScaler copies the DX11 backbuffer to the DX12 FG chain before the hidden
-    // DX11 Present occurs, so ReShade's Present-time UI never reaches final output.
-    //
-    // Home toggles a conservative tuning mode: FG is temporarily disabled and only
-    // the original DX11 swapchain is presented. ReShade therefore owns the visible
-    // Present exactly as it did before XeFG. On the closing Home press we re-enable
-    // FG before presenting the closing frame, so the next game frame can repopulate
-    // Depth/MV and let the existing V15 warm-up path resume safely.
-    const bool wh3ReShadeCompat =
-        _stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
-        GetModuleHandleW(L"ReShade64.dll") != nullptr;
-
-    if (wh3ReShadeCompat)
-    {
-        const bool homeDown = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
-        if (homeDown && !wh3ReShadeHomeWasDown)
-        {
-            if (!wh3ReShadeTuningMode)
-            {
-                wh3ReShadeRestoreFg = Config::Instance()->FGEnabled.value_or_default();
-                if (wh3ReShadeRestoreFg)
-                {
-                    Config::Instance()->FGEnabled.set_volatile_value(false);
-                    State::Instance().fgChanged = true;
-                }
-
-                wh3ReShadeTuningMode = true;
-                wh3ReShadeResumeAfterPresent = false;
-                LOG_INFO("WH3 ReShade tuning mode: ON; original DX11 Present is visible, XeFG temporarily paused");
-            }
-            else
-            {
-                if (wh3ReShadeRestoreFg)
-                {
-                    Config::Instance()->FGEnabled.set_volatile_value(true);
-                    State::Instance().fgChanged = true;
-                }
-
-                wh3ReShadeResumeAfterPresent = true;
-                LOG_INFO("WH3 ReShade tuning mode: closing; FG restored for next frame");
-            }
-        }
-        wh3ReShadeHomeWasDown = homeDown;
-    }
-
-    if (wh3ReShadeTuningMode)
-    {
-        auto tuningPresentResult = _real->Present(SyncInterval, Flags);
-
-        if (wh3ReShadeResumeAfterPresent)
-        {
-            wh3ReShadeTuningMode = false;
-            wh3ReShadeResumeAfterPresent = false;
-            wh3ReShadeRestoreFg = false;
-            LOG_INFO("WH3 ReShade tuning mode: OFF; returning to XeFG presenter");
-        }
-
-        return tuningPresentResult;
-    }
-
-    if (!_InitInteropObjects())
-        return DXGI_ERROR_DEVICE_REMOVED;
-'''
-          if old not in s:
-              raise SystemExit('V16 Present insertion anchor missing')
-          s = s.replace(old, new, 1)
-          p.write_text(s, encoding='utf-8')
-          '@ | Set-Content -Encoding UTF8 apply_v16.py
-          python apply_v16.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          Set-Location optiscaler-src
-          git diff --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --binary HEAD | Out-File -Encoding utf8 "${{ github.workspace }}\WH3-v16-reshade-tuning.patch"
-
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build Release x64
+      - name: Build V16 experiment
         shell: powershell
-        run: |
-          Set-Location optiscaler-src
-          msbuild /m /p:Configuration=Release . /verbosity:minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Verify V16 markers and stage
-        shell: powershell
-        run: |
-          $dll = "optiscaler-src\x64\Release\a\OptiScaler.dll"
-          if (-not (Test-Path $dll)) { Write-Error "Compiled DLL missing"; exit 1 }
-          $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll))
-          foreach ($marker in @(
-            "WH3 native DLSS passthrough:",
-            "WH3 native DLSS bridge: private shadow active",
-            "WH3 XeFG compatibility:",
-            "WH3 ReShade tuning mode: ON",
-            "WH3 ReShade tuning mode: OFF"
-          )) {
-            if (-not $ascii.Contains($marker)) { Write-Error "Missing marker: $marker"; exit 1 }
-          }
-
-          New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item -Recurse -Force "optiscaler-src\x64\Release\a\*" package\
-          Copy-Item -Force "WH3-v16-reshade-tuning.patch" package\
-          @"
-          WH3 Native DLSS5 -> XeFG V16 ReShade tuning experiment
-
-          Base: validated V15 RC1 patch on OptiScaler 5c5e424d
-
-          Test goal:
-          - With XeFG active and the game in a 3D battle, press Home once.
-          - Expected: XeFG pauses and the original DX11/ReShade presentation becomes visible.
-          - ReShade/ShortFuse overlay should open normally.
-          - Adjust DLSS5 parameters.
-          - Press Home again.
-          - Expected: ReShade closes, FG is restored, then V15 Depth/MV warm-up resumes XeFG.
-
-          This is an experimental branch build. RC1/main remains unchanged.
-          "@ | Set-Content -Encoding UTF8 package\README-V16-TEST.txt
+        run: .\experiments\v16\build.ps1
 
       - name: Upload V16 experiment
         uses: actions/upload-artifact@v4
