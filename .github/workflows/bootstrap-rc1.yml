@@ -44,7 +44,6 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$SRC/source/WH3-native-DLSS5-XeFG.patch"
-          test -f "$SRC/docs/four-green-status.png"
 
           rm -rf config source tools docs
           cp -R "$SRC/config" ./config
@@ -64,7 +63,10 @@ jobs:
           prefix = '[中文说明](README.zh-CN.md) · [Download RC1](https://github.com/hackpointt/WH3-Native-DLSS5-XeF/releases/tag/v0.1.0-rc1)\n\n'
           if prefix not in s:
               s = s.replace('\n\n', '\n\n' + prefix, 1)
-          s = s.replace('See `docs/four-green-status.png` for the expected result.', '![Expected four-green status](docs/four-green-status.png)')
+          if Path('docs/four-green-status.png').exists():
+              s = s.replace('See `docs/four-green-status.png` for the expected result.', '![Expected four-green status](docs/four-green-status.png)')
+          else:
+              s = s.replace('See `docs/four-green-status.png` for the expected result.', '')
           p.write_text(s, encoding='utf-8')
 
           p = Path('README.zh-CN.md')
@@ -73,7 +75,10 @@ jobs:
           prefix = '[English](README.md) · [下载 RC1](https://github.com/hackpointt/WH3-Native-DLSS5-XeF/releases/tag/v0.1.0-rc1)\n\n'
           if prefix not in s:
               s = s.replace('\n\n', '\n\n' + prefix, 1)
-          s = s.replace('示例见 `docs/four-green-status.png`。', '![四绿状态示例](docs/four-green-status.png)')
+          if Path('docs/four-green-status.png').exists():
+              s = s.replace('示例见 `docs/four-green-status.png`。', '![四绿状态示例](docs/four-green-status.png)')
+          else:
+              s = s.replace('示例见 `docs/four-green-status.png`。', '')
           p.write_text(s, encoding='utf-8')
           PY
 
