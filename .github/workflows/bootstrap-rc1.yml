@@ -29,13 +29,22 @@ jobs:
           rm -rf /tmp/wh3-rc1
           mkdir -p /tmp/wh3-rc1
           unzip -q /tmp/WH3-Native-DLSS5-XeFG-RC1-v15.zip -d /tmp/wh3-rc1
-          test -f /tmp/wh3-rc1/WH3-Native-DLSS5-XeFG-RC1-v15/source/WH3-native-DLSS5-XeFG.patch
-          test -f /tmp/wh3-rc1/WH3-Native-DLSS5-XeFG-RC1-v15/docs/four-green-status.png
+
+          if [ -f /tmp/wh3-rc1/source/WH3-native-DLSS5-XeFG.patch ]; then
+            echo 'SRC=/tmp/wh3-rc1' >> "$GITHUB_ENV"
+          elif [ -f /tmp/wh3-rc1/WH3-Native-DLSS5-XeFG-RC1-v15/source/WH3-native-DLSS5-XeFG.patch ]; then
+            echo 'SRC=/tmp/wh3-rc1/WH3-Native-DLSS5-XeFG-RC1-v15' >> "$GITHUB_ENV"
+          else
+            echo 'Could not locate extracted RC1 root'
+            find /tmp/wh3-rc1 -maxdepth 3 -type f | sort | head -200
+            exit 1
+          fi
 
       - name: Populate clean project repository
         run: |
           set -euo pipefail
-          SRC=/tmp/wh3-rc1/WH3-Native-DLSS5-XeFG-RC1-v15
+          test -f "$SRC/source/WH3-native-DLSS5-XeFG.patch"
+          test -f "$SRC/docs/four-green-status.png"
 
           rm -rf config source tools docs
           cp -R "$SRC/config" ./config
