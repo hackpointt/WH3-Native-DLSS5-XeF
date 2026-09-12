@@ -1,0 +1,311 @@
+﻿diff --git a/OptiScaler/State.h b/OptiScaler/State.h
+index 8c373998..50a2ceb0 100644
+--- a/OptiScaler/State.h
++++ b/OptiScaler/State.h
+@@ -10,6 +10,7 @@
+ #include <set>
+ #include <deque>
+ #include <mutex>
++#include <atomic>
+ #include <sl_dlss_g.h>
+ #include <vulkan/vulkan.h>
+ #include <ankerl/unordered_dense.h>
+@@ -162,6 +163,10 @@ class State
+     // FG
+     uint64_t fgLastFrame = 0;
+ 
++    // WH3 native-DLSS -> OptiFG compatibility status. Updated only after a
++    // successful native NVIDIA D3D12 DLSS EvaluateFeature call.
++    std::atomic<uint64_t> wh3NativeDlssLastSuccessTick { 0 };
++
+     // Nvngx FG, uses streamline swapchain
+     bool nukemsFgFileAvailable = false;
+     bool artursFgFileAvailable = false;
+diff --git a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+index 2a7ccd8a..e5a52010 100644
+--- a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
++++ b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
+@@ -355,6 +355,24 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
+     scDesc.SwapEffect = desc->SwapEffect;
+     scDesc.Width = desc->BufferDesc.Width;
+ 
++    // Warhammer III's DX11 swapchain requests UNORDERED_ACCESS. XeFG rejects that usage
++    // when OptiScaler converts the chain to the DX12 FG presenter, so sanitize only WH3.
++    const bool wh3XeFgCompat = _stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0;
++    if (wh3XeFgCompat)
++    {
++        LOG_INFO("WH3 XeFG compatibility: Width {}, Height {}, Format {}, Count {}, Usage {:X}, Flags {:X}, Scaling {}, SwapEffect {}, SampleCount {}, SampleQuality {}, AlphaMode {}",
++                 scDesc.Width, scDesc.Height, (UINT) scDesc.Format, scDesc.BufferCount, (UINT) scDesc.BufferUsage,
++                 (UINT) scDesc.Flags, (UINT) scDesc.Scaling, (UINT) scDesc.SwapEffect,
++                 scDesc.SampleDesc.Count, scDesc.SampleDesc.Quality, (UINT) scDesc.AlphaMode);
++
++        if ((scDesc.BufferUsage & DXGI_USAGE_UNORDERED_ACCESS) != 0)
++        {
++            scDesc.BufferUsage &= ~DXGI_USAGE_UNORDERED_ACCESS;
++            LOG_INFO("WH3 XeFG compatibility: removed DXGI_USAGE_UNORDERED_ACCESS; Usage now {:X}",
++                     (UINT) scDesc.BufferUsage);
++        }
++    }
++
+     DXGI_SWAP_CHAIN_FULLSCREEN_DESC fsDesc {};
+     fsDesc.RefreshRate = desc->BufferDesc.RefreshRate;
+     fsDesc.Scaling = desc->BufferDesc.Scaling;
+@@ -416,8 +434,16 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
+ #endif // !DONT_USE_XMX
+ 
+     xefg_swapchain_result_t result;
+-    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, &fsDesc, realQueue, factory12,
+-                                                     &params);
++
++    // Intel's windowed XeFG path expects no fullscreen descriptor. Keep the workaround scoped
++    // to WH3 so unrelated games retain upstream OptiScaler behavior.
++    DXGI_SWAP_CHAIN_FULLSCREEN_DESC* xefgFullscreenDesc =
++        (wh3XeFgCompat && desc->Windowed) ? nullptr : &fsDesc;
++    if (wh3XeFgCompat && desc->Windowed)
++        LOG_INFO("WH3 XeFG compatibility: omitting fullscreen descriptor for windowed swapchain");
++
++    result = XeFGProxy::D3D12InitFromSwapChainDesc()(_swapChainContext, hwnd, &scDesc, xefgFullscreenDesc,
++                                                     realQueue, factory12, &params);
+ 
+     if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+     {
+diff --git a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp b/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
+index 3ba1d030..6ab2a5a4 100644
+--- a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
++++ b/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
+@@ -32,6 +32,31 @@ static bool shutdown = false;
+ static bool _skipInit = false;
+ static wchar_t const** paths;
+ 
++// WH3 v12: metadata-only shadow feature. While FG is disabled it remains fully dormant:
++// no currentFeature assignment, no FG state calls, and no shadow frame advancement.
++class WH3NativeDlssInputFeature final : public IFeature_Dx12
++{
++  public:
++    WH3NativeDlssInputFeature(unsigned int handleId, NVSDK_NGX_Parameter* params)
++        : IFeature(handleId, params), IFeature_Dx12(handleId, params)
++    {
++        _initParameters = SetInitParameters(params);
++        SetInit(_initParameters);
++        LOG_INFO("WH3 native DLSS bridge: shadow init: {}, IsInitParameters {}, Render {}x{}, Display {}x{}, Flags 0x{:X}, LowResMV {}, DepthInverted {}, JitteredMV {}",
++                 IsInited(), IsInitParameters(), RenderWidth(), RenderHeight(), DisplayWidth(), DisplayHeight(), GetFeatureFlags(),
++                 LowResMV(), DepthInverted(), JitteredMV());
++    }
++
++    bool InitInternal(ID3D12GraphicsCommandList*, NVSDK_NGX_Parameter*) override { return true; }
++    bool EvaluateInternal(ID3D12GraphicsCommandList*, NVSDK_NGX_Parameter*) override { return true; }
++    feature_version Version() override { return feature_version { 0, 0, 0 }; }
++    Upscaler GetUpscalerType() const final { return Upscaler::DLSS; }
++    bool IsWithDx12() override { return false; }
++    void AdvanceFrame() { _frameCount++; }
++};
++
++static std::unordered_map<unsigned int, std::unique_ptr<WH3NativeDlssInputFeature>> wh3NativeInputFeatures;
++
+ class ScopedInitDx12
+ {
+   private:
+@@ -793,6 +818,49 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsComma
+         return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
+     }
+ 
++    // Warhammer III + ShortFuse DLSS5 compatibility test v2.
++    //
++    // WH3 itself is D3D11. We want OptiScaler to keep intercepting the game's
++    // D3D11 DLSS feature so OptiFG can consume its upscaler inputs. ShortFuse's
++    // dlss5-feed addon creates a separate D3D12 DLSS SuperSampling feature.
++    // Replacing that helper feature with an OptiScaler feature freezes WH3.
++    //
++    // v1 gated passthrough on NVNGXProxy::InitDx12(D3D12Device). The captured
++    // log showed that gate was false even though native D3D12 NGX had already
++    // initialized successfully, so TryCreateOptiFeature still ran. v2 removes
++    // that redundant gate and forces native passthrough for WH3's D3D12 DLSS
++    // SuperSampling/RR calls. If native NGX is unexpectedly unavailable, fail
++    // closed instead of re-entering OptiScaler's D3D12 upscaler path.
++    const auto exeName = Util::ExePath().filename().wstring();
++    const bool wh3Dlss5Compat = _wcsicmp(exeName.c_str(), L"Warhammer3.exe") == 0;
++    const bool d3d12DlssAuxFeature =
++        InFeatureID == NVSDK_NGX_Feature_SuperSampling ||
++        InFeatureID == NVSDK_NGX_Feature_RayReconstruction;
++
++    if (wh3Dlss5Compat && d3d12DlssAuxFeature)
++    {
++        if (NVNGXProxy::NVNGXModule() == nullptr)
++            NVNGXProxy::InitNVNGX();
++
++        auto nativeCreate = NVNGXProxy::D3D12_CreateFeature();
++        LOG_INFO("WH3 native DLSS passthrough: D3D12 feature {}, native CreateFeature available: {}",
++                 (int) InFeatureID, nativeCreate != nullptr);
++
++        if (cfg.DLSSEnabled.value_or_default() && nativeCreate != nullptr)
++        {
++            NVSDK_NGX_Result res = nativeCreate(InCmdList, InFeatureID, InParameters, OutHandle);
++            LOG_INFO("WH3 native DLSS passthrough: native D3D12 CreateFeature result: 0x{:X}", (uint32_t) res);
++
++            if (*OutHandle)
++                HandleToFeature[(*OutHandle)->Id] = InFeatureID;
++
++            return res;
++        }
++
++        LOG_ERROR("WH3 native DLSS passthrough: native D3D12 NGX unavailable; refusing OptiScaler interception");
++        return NVSDK_NGX_Result_FAIL_FeatureNotSupported;
++    }
++
+     // OptiScaler internal handling (SuperSampling or RayReconstruction)
+     auto tryResult = TryCreateOptiFeature(InCmdList, InFeatureID, InParameters, OutHandle);
+ 
+@@ -826,6 +894,15 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle*
+     // OptiScaler handles start after this offset. If it's outside this range, it doesn't belong to OptiScaler.
+     if (handleId < DLSS_MOD_ID_OFFSET)
+     {
++        auto bridgeIt = wh3NativeInputFeatures.find(handleId);
++        if (bridgeIt != wh3NativeInputFeatures.end())
++        {
++            if (State::Instance().currentFeature == bridgeIt->second.get())
++                State::Instance().currentFeature = nullptr;
++            wh3NativeInputFeatures.erase(bridgeIt);
++            LOG_INFO("WH3 native DLSS bridge: released for native handle {}", handleId);
++        }
++
+         if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::D3D12_ReleaseFeature() != nullptr)
+         {
+             if (!shutdown)
+@@ -1139,10 +1216,94 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
+     {
+         if (cfg.DLSSEnabled.value_or_default() && NVNGXProxy::D3D12_EvaluateFeature() != nullptr)
+         {
++            WH3NativeDlssInputFeature* bridgeFeature = nullptr;
++            bool wh3BridgeRunning = false;
++            const bool wh3NativeBridge =
++                _wcsicmp(Util::ExePath().filename().wstring().c_str(), L"Warhammer3.exe") == 0 &&
++                feature == NVSDK_NGX_Feature_SuperSampling && InParameters != nullptr &&
++                State::Instance().activeFgInput == FGInput::Upscaler;
++
++            if (wh3NativeBridge)
++            {
++                auto it = wh3NativeInputFeatures.find(handleId);
++                if (it == wh3NativeInputFeatures.end())
++                {
++                    auto shadow = std::make_unique<WH3NativeDlssInputFeature>(handleId, InParameters);
++                    bridgeFeature = shadow.get();
++                    wh3NativeInputFeatures.emplace(handleId, std::move(shadow));
++                    LOG_INFO("WH3 native DLSS bridge: created for native handle {}", handleId);
++                }
++                else
++                {
++                    bridgeFeature = it->second.get();
++                }
++
++                if (bridgeFeature != nullptr && bridgeFeature->IsInitParameters())
++                {
++                    const bool fgEnabled = Config::Instance()->FGEnabled.value_or_default();
++                    if (fgEnabled)
++                    {
++                        // V11 proved that merely publishing the shadow object as currentFeature while
++                        // FG was disabled was enough to wedge the following Present. Publish it only
++                        // for an explicitly enabled FG frame.
++                        // V13: keep the metadata-only shadow object private. Publishing it through
++                        // State::currentFeature makes LocalPresent treat it like a real initialized
++                        // upscaler and enter GPU-timing/frozen-check paths the shadow does not own.
++                        // UpscalerInputsDx12 already receives the feature explicitly, and XeFG can
++                        // activate from low-res MV metadata without currentFeature.
++                        wh3BridgeRunning = true;
++                        static bool wh3V13Logged = false;
++                        if (!wh3V13Logged)
++                        {
++                            LOG_INFO("WH3 native DLSS bridge: private shadow active; currentFeature untouched");
++                            wh3V13Logged = true;
++                        }
++
++                        UpscalerInputsDx12::UpscaleStart(InCmdList, InParameters, bridgeFeature);
++                        UpscalerInputsDx12::UpscaleEnd(InCmdList, InParameters, bridgeFeature);
++
++                        static uint64_t wh3BridgeCounter = 0;
++                        wh3BridgeCounter++;
++                        if (wh3BridgeCounter <= 12 || (wh3BridgeCounter % 300) == 0)
++                        {
++                            auto fg = State::Instance().currentFG;
++                            LOG_INFO("WH3 native DLSS bridge: tick #{}: FGEnabled {}, fg {}, active {}, paused {}, depth {}, velocity {}, frame {}",
++                                     wh3BridgeCounter, fgEnabled, fg != nullptr,
++                                     fg != nullptr ? fg->IsActive() : false,
++                                     fg != nullptr ? fg->IsPaused() : false,
++                                     fg != nullptr ? fg->HasResource(FG_ResourceType::Depth) : false,
++                                     fg != nullptr ? fg->HasResource(FG_ResourceType::Velocity) : false,
++                                     fg != nullptr ? fg->FrameCount() : 0);
++                        }
++                    }
++                    else
++                    {
++                        if (State::Instance().currentFeature == bridgeFeature)
++                            State::Instance().currentFeature = nullptr;
++
++                        static uint64_t wh3DormantCounter = 0;
++                        wh3DormantCounter++;
++                        if (wh3DormantCounter <= 3 || (wh3DormantCounter % 300) == 0)
++                            LOG_INFO("WH3 native DLSS bridge: dormant: FG disabled; currentFeature untouched");
++                    }
++                }
++                else
++                {
++                    LOG_ERROR("WH3 native DLSS bridge: blocked: shadow feature missing init parameters");
++                }
++            }
++
+             LOG_DEBUG("Passthrough to native DLSS EvaluateFeature for handle {}", handleId);
+             NVSDK_NGX_Result result =
+                 NVNGXProxy::D3D12_EvaluateFeature()(InCmdList, InFeatureHandle, InParameters, InCallback);
+             LOG_DEBUG("Native DLSS EvaluateFeature result: 0x{:X}", (uint32_t) result);
++
++            if (wh3NativeBridge && result == NVSDK_NGX_Result_Success)
++                State::Instance().wh3NativeDlssLastSuccessTick.store(GetTickCount64(), std::memory_order_relaxed);
++
++            if (wh3BridgeRunning && bridgeFeature != nullptr)
++                bridgeFeature->AdvanceFrame();
++
+             return result;
+         }
+ 
+diff --git a/OptiScaler/menu/menu_common.cpp b/OptiScaler/menu/menu_common.cpp
+index d3b732d7..9bee8d96 100644
+--- a/OptiScaler/menu/menu_common.cpp
++++ b/OptiScaler/menu/menu_common.cpp
+@@ -1,4 +1,4 @@
+-﻿#include "pch.h"
++#include "pch.h"
+ #include "menu_common.h"
+ 
+ #include "input/input_system.h"
+@@ -4546,7 +4546,31 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
+         }
+         else if (currentFeature == nullptr || currentFeature->IsFrozen())
+         {
+-            ImGui::Text("Upscaler is not active"); // Probably never will be visible
++            if (_stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0)
++            {
++                const bool feederDetected = GetModuleHandleW(L"dlss5-feed.addon64") != nullptr;
++                const uint64_t now = GetTickCount64();
++                const uint64_t lastDlssSuccess =
++                    State::Instance().wh3NativeDlssLastSuccessTick.load(std::memory_order_relaxed);
++                const bool nativeDlssActive = lastDlssSuccess != 0 && now >= lastDlssSuccess &&
++                                            (now - lastDlssSuccess) < 2000;
++
++                auto fg = State::Instance().currentFG;
++                const bool depthReady = fg != nullptr && fg->HasResource(FG_ResourceType::Depth);
++                const bool velocityReady = fg != nullptr && fg->HasResource(FG_ResourceType::Velocity);
++                const bool xefgActive = State::Instance().activeFgOutput == FGOutput::XeFG && fg != nullptr &&
++                                       fg->IsActive() && !fg->IsPaused();
++
++                ImGui::Text("WH3 native DLSS5 -> XeFG bridge");
++                ImGui::Text("DLSS5 feeder:    %s", feederDetected ? "DETECTED" : "not detected");
++                ImGui::Text("Native DLSS NGX: %s", nativeDlssActive ? "ACTIVE" : "inactive");
++                ImGui::Text("Depth + MV:      %s", (depthReady && velocityReady) ? "READY" : "not ready");
++                ImGui::Text("XeFG:            %s", xefgActive ? "ACTIVE" : "inactive");
++            }
++            else
++            {
++                ImGui::Text("Upscaler is not active"); // Probably never will be visible
++            }
+         }
+         else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady())
+         {

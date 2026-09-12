@@ -1,0 +1,20 @@
+{
+  "name": "WH3 Native DLSS5 -> XeFG RC1",
+  "implementation": "V15",
+  "release_date": "2026-09-13",
+  "base_optiscaler_commit": "5c5e424dd137d69ef36c4231fd45b760b4c65cc8",
+  "github_workflow_run": 34704880248,
+  "github_artifact_id": 10300728399,
+  "github_source_artifact_sha256": "81600e9bf9789d85ccea2431bc9ecb86fd8807f877a55f3375f65668012d87a7",
+  "validated": {
+    "game": "Total War: WARHAMMER III 8.1.0",
+    "api": "DX11 with DX11->DX12 interop presenter",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "resolutions": [
+      "2560x1440",
+      "3840x2160"
+    ],
+    "smooth_motion": "off",
+    "rtss": "off"
+  }
+}

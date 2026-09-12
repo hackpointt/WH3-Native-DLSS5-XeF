@@ -1,0 +1,7 @@
+WH3 Native DLSS5 -> XeFG RC1
+Implementation build: V15
+Release date: 2026-09-13
+Base OptiScaler commit: 5c5e424dd137d69ef36c4231fd45b760b4c65cc8
+Validated game: Total War: WARHAMMER III 8.1.0 (DX11)
+Validated GPU: NVIDIA GeForce RTX 4090
+Validated resolutions: 2560x1440 and 3840x2160

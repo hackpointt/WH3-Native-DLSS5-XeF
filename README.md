@@ -22,7 +22,6 @@ Depth + MV:       READY
 XeFG:             ACTIVE
 ```
 
-![Expected four-green status](docs/four-green-status.png)
 
 ## Before installing
 
@@ -79,7 +78,7 @@ The installer records its backup location and the uninstall script restores the 
 
 ## Technical source
 
-The release contains `source/WH3-native-DLSS5-XeFG.patch`, based on OptiScaler commit:
+The package includes `source/WH3-native-DLSS5-XeFG.patch`, based on OptiScaler commit:
 
 `5c5e424dd137d69ef36c4231fd45b760b4c65cc8`
 
