@@ -1,0 +1,35 @@
+name: Build V18 DLSSNR + XeFG integration
+
+on:
+  push:
+    branches: [dlssnr-v18-integration]
+    paths:
+      - '.github/workflows/build-v18-dlssnr.yml'
+      - 'experiments/v18-dlssnr/**'
+      - 'experiments/v17/**'
+      - 'source/WH3-native-DLSS5-XeFG.patch'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build V18 DLSSNR integration
+        shell: powershell
+        run: .\experiments\v18-dlssnr\build.ps1
+
+      - name: Upload V18 experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: WH3-DLSS5-NR-XeFG-V18
+          path: package
+          if-no-files-found: error
