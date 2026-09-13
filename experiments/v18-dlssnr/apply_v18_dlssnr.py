@@ -76,6 +76,167 @@ p.write_text(s, encoding='utf-8')
 
 
 # -----------------------------------------------------------------------------
+# V18.1 sparse diagnostics: prove the native-DLSS -> NR call boundary without
+# changing when either operation runs.
+# -----------------------------------------------------------------------------
+p = ROOT / 'OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp'
+s = p.read_text(encoding='utf-8-sig')
+
+nr_call_anchor = '''            // Keep the DLSSNR fork's essential ordering: the neural model runs AFTER
+            // NVIDIA DLSS wrote Output and BEFORE XeFG consumes the finished frame.
+            if (result == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration)
+                DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
+'''
+nr_call_insert = '''            // Keep the DLSSNR fork's essential ordering: the neural model runs AFTER
+            // NVIDIA DLSS wrote Output and BEFORE XeFG consumes the finished frame.
+            if (result == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration)
+            {
+                static std::atomic_uint64_t wh3NrTraceCounter { 0 };
+                const uint64_t traceId = wh3NativeBridge
+                    ? wh3NrTraceCounter.fetch_add(1, std::memory_order_relaxed) + 1
+                    : 0;
+                const bool trace = wh3NativeBridge && (traceId <= 10 || (traceId % 300) == 0);
+
+                if (trace)
+                    LOG_INFO("WH3 NR trace #{}: native DLSS result 0x{:X} -> EvaluateAfterUpscale enter; handle {}, feature {}",
+                             traceId, (uint32_t) result, handleId, (int) feature);
+
+                DlssNr::EvaluateAfterUpscale(InCmdList, InParameters);
+
+                if (trace)
+                    LOG_INFO("WH3 NR trace #{}: EvaluateAfterUpscale returned; running {}, failure '{}'",
+                             traceId, DlssNr::IsRunning(), DlssNr::FailureReason());
+            }
+'''
+if 'WH3 NR trace #' not in s:
+    s = replace_once(s, nr_call_anchor, nr_call_insert, 'V18.1 native-to-NR trace')
+
+p.write_text(s, encoding='utf-8')
+
+
+# -----------------------------------------------------------------------------
+# Neural Rendering: sparse, result-bearing diagnostics at the real feature-18
+# evaluate call. Only this seam can prove which backend ran and NVIDIA's result.
+# -----------------------------------------------------------------------------
+p = ROOT / 'OptiScaler/shaders/dlssnr/DlssNr_Dx12.cpp'
+s = p.read_text(encoding='utf-8-sig')
+
+nr_diag_anchor = '''    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+
+    // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
+'''
+nr_diag_insert = '''    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+
+    // V18.1 instrumentation only. Keep enough INFO-level evidence to prove the
+    // actual feature-18 backend/result without restoring per-frame debug spam.
+    const bool wh3NrDiagnostic =
+        _stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0;
+    static uint64_t wh3NrEvaluateCounter = 0;
+    const uint64_t wh3NrEvaluateId = wh3NrDiagnostic ? ++wh3NrEvaluateCounter : 0;
+    const bool wh3NrSample = wh3NrDiagnostic &&
+        (wh3NrEvaluateId <= 10 || (wh3NrEvaluateId % 300) == 0);
+
+    // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
+'''
+if 'V18.1 instrumentation only' not in s:
+    s = replace_once(s, nr_diag_anchor, nr_diag_insert, 'V18.1 NR diagnostic state')
+
+proxy_anchor = '''    if (cfg.DlssNrUseProxy.value_or_default())
+    {
+        const unsigned int proxyResult = DlssNr::Proxy::Run(
+'''
+proxy_insert = '''    if (cfg.DlssNrUseProxy.value_or_default())
+    {
+        if (wh3NrSample)
+            LOG_INFO("WH3 NR evaluate #{}: backend proxy, feature18 dispatch begin; work {}x{}, guides {}x{}, reset {}",
+                     wh3NrEvaluateId, workWidth, workHeight, guideWidth, guideHeight, g_nr.reset);
+
+        const unsigned int proxyResult = DlssNr::Proxy::Run(
+'''
+if 'backend proxy, feature18 dispatch begin' not in s:
+    s = replace_once(s, proxy_anchor, proxy_insert, 'V18.1 proxy begin trace')
+
+proxy_result_anchor = '''        g_nr.reset = false;
+
+        if (proxyResult != 1)
+'''
+proxy_result_insert = '''        g_nr.reset = false;
+
+        if (wh3NrSample || proxyResult != NVSDK_NGX_Result_Success)
+            LOG_INFO("WH3 NR evaluate #{}: backend proxy, feature18 result 0x{:X} ({})",
+                     wh3NrEvaluateId, proxyResult, NgxResultName(proxyResult));
+
+        if (proxyResult != 1)
+'''
+if 'backend proxy, feature18 result' not in s:
+    s = replace_once(s, proxy_result_anchor, proxy_result_insert, 'V18.1 proxy result trace')
+
+forwarder_anchor = '''    // Multi-pass was removed: re-feeding the model its own output re-opened the same-command-list
+    // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
+    const int result = g_nr.evaluate(
+'''
+forwarder_insert = '''    // Multi-pass was removed: re-feeding the model its own output re-opened the same-command-list
+    // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
+    if (wh3NrSample)
+        LOG_INFO("WH3 NR evaluate #{}: backend forwarder, feature18 dispatch begin; loaded {}, work {}x{}, guides {}x{}, reset {}",
+                 wh3NrEvaluateId, g_nr.feature != nullptr, workWidth, workHeight, guideWidth, guideHeight,
+                 g_nr.reset);
+
+    const int result = g_nr.evaluate(
+'''
+if 'backend forwarder, feature18 dispatch begin' not in s:
+    s = replace_once(s, forwarder_anchor, forwarder_insert, 'V18.1 forwarder begin trace')
+
+forwarder_result_anchor = '''    if (g_ngxTime != nullptr)
+        g_ngxTime->End(cmdList);
+
+    g_nr.reset = false;
+'''
+forwarder_result_insert = '''    if (g_ngxTime != nullptr)
+        g_ngxTime->End(cmdList);
+
+    if (wh3NrSample || result != NVSDK_NGX_Result_Success)
+        LOG_INFO("WH3 NR evaluate #{}: backend forwarder, feature18 result 0x{:X} ({})",
+                 wh3NrEvaluateId, (uint32_t) result, NgxResultName((unsigned int) result));
+
+    g_nr.reset = false;
+'''
+if 'backend forwarder, feature18 result' not in s:
+    s = replace_once(s, forwarder_result_anchor, forwarder_result_insert, 'V18.1 forwarder result trace')
+
+p.write_text(s, encoding='utf-8')
+
+
+# -----------------------------------------------------------------------------
+# XeFG: sparse INFO success marker. Existing errors stay unthrottled.
+# -----------------------------------------------------------------------------
+p = ROOT / 'OptiScaler/framegen/xefg/XeFG_Dx12.cpp'
+s = p.read_text(encoding='utf-8-sig')
+
+xefg_trace_anchor = '''    LOG_DEBUG("Result: Ok");
+
+    return true;
+'''
+xefg_trace_insert = '''    LOG_DEBUG("Result: Ok");
+
+    if (_stricmp(state.gameExe.c_str(), "Warhammer3.exe") == 0)
+    {
+        static uint64_t wh3XeFgSuccessCounter = 0;
+        const uint64_t traceId = ++wh3XeFgSuccessCounter;
+        if (traceId <= 10 || (traceId % 300) == 0)
+            LOG_INFO("WH3 XeFG trace #{}: Dispatch Ok; frameId {}, depth ready, velocity ready",
+                     traceId, frameId);
+    }
+
+    return true;
+'''
+if 'WH3 XeFG trace #' not in s:
+    s = replace_once(s, xefg_trace_anchor, xefg_trace_insert, 'V18.1 XeFG success trace')
+
+p.write_text(s, encoding='utf-8')
+
+
+# -----------------------------------------------------------------------------
 # Menu: extend V14's observability to a five-state DLSSNR build.
 # -----------------------------------------------------------------------------
 p = ROOT / 'OptiScaler/menu/menu_common.cpp'

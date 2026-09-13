@@ -43,6 +43,8 @@ $ini = Set-IniValue $ini 'FrameGen' 'FGInput' 'upscaler'
 $ini = Set-IniValue $ini 'FrameGen' 'FGOutput' 'xefg'
 $ini = Set-IniValue $ini 'Inputs' 'EnableDlssInputs' 'true'
 $ini = Set-IniValue $ini 'Plugins' 'LoadReshade' 'true'
+$ini = Set-IniValue $ini 'Log' 'LogToFile' 'true'
+$ini = Set-IniValue $ini 'Log' 'LogLevel' '2'
 [System.IO.File]::WriteAllText($iniPath, $ini, (New-Object System.Text.UTF8Encoding($false)))
 
 Set-Location optiscaler-src
@@ -64,6 +66,11 @@ if ($nativeBlock -notmatch 'DlssNr::EvaluateAfterUpscale') {
 if ($nativeBlock.IndexOf('D3D12_EvaluateFeature()(InCmdList') -gt $nativeBlock.IndexOf('DlssNr::EvaluateAfterUpscale')) {
     throw 'DLSSNR ordering invalid: Neural Rendering appears before native NVIDIA DLSS evaluate'
 }
+if ($nativeBlock -notmatch 'WH3 NR trace #') { throw 'Sparse native-to-NR ordering trace missing' }
+
+$nr = Get-Content 'OptiScaler\shaders\dlssnr\DlssNr_Dx12.cpp' -Raw
+if ($nr -notmatch 'backend forwarder, feature18 result') { throw 'Forwarder feature-18 result trace missing' }
+if ($nr -notmatch 'backend proxy, feature18 result') { throw 'Proxy feature-18 result trace missing' }
 
 $menu = Get-Content 'OptiScaler\menu\menu_common.cpp' -Raw
 if ($menu -notmatch 'WH3 native DLSS5 NR -> XeFG bridge') { throw 'Five-state WH3 status panel missing' }
@@ -72,15 +79,16 @@ if ($menu -notmatch 'DlssNr::IsRunning') { throw 'Neural Rendering live status m
 $xefg = Get-Content 'OptiScaler\framegen\xefg\XeFG_Dx12.cpp' -Raw
 if ($xefg -notmatch 'WH3 XeFG compatibility: removed DXGI_USAGE_UNORDERED_ACCESS') { throw 'WH3 XeFG UAV fix missing' }
 if ($xefg -notmatch 'xefgFullscreenDesc') { throw 'WH3 XeFG windowed fullscreen-desc fix missing' }
+if ($xefg -notmatch 'WH3 XeFG trace #') { throw 'Sparse XeFG success trace missing' }
 
 $configText = Get-Content 'OptiScaler.ini' -Raw
-foreach ($required in @('Enabled=true', 'FGInput=upscaler', 'FGOutput=xefg', 'EnableDlssInputs=true', 'LoadReshade=true')) {
+foreach ($required in @('Enabled=true', 'FGInput=upscaler', 'FGOutput=xefg', 'EnableDlssInputs=true', 'LoadReshade=true', 'LogToFile=true', 'LogLevel=2')) {
     if ($configText -notmatch [regex]::Escape($required)) { throw "WH3 packaged config missing $required" }
 }
 
 git diff --check
 Assert-NativeSuccess 'git diff --check'
-git diff --binary HEAD | Out-File -Encoding utf8 '..\WH3-v18-dlssnr-xefg.patch'
+git diff --binary HEAD | Out-File -Encoding utf8 '..\WH3-v18.1-dlssnr-diagnostic.patch'
 
 Write-Host 'Building Release x64...'
 msbuild /m /p:Configuration=Release . /verbosity:minimal
@@ -96,14 +104,17 @@ foreach ($marker in @(
     'WH3 XeFG compatibility:',
     'WH3 ReShade post-FG: armed by Home',
     'WH3 native DLSS5 NR -> XeFG bridge',
-    'Neural Rendering:'
+    'Neural Rendering:',
+    'WH3 NR trace #',
+    'backend forwarder, feature18 result',
+    'WH3 XeFG trace #'
 )) {
     if (-not $ascii.Contains($marker)) { throw "Missing compiled marker: $marker" }
 }
 
 New-Item -ItemType Directory -Force -Path package | Out-Null
 Copy-Item -Recurse -Force 'optiscaler-src\x64\Release\a\*' package\
-Copy-Item -Force 'WH3-v18-dlssnr-xefg.patch' package\
+Copy-Item -Force 'WH3-v18.1-dlssnr-diagnostic.patch' package\
 Copy-Item -Force 'optiscaler-src\OptiScaler.ini' package\OptiScaler-DLSSNR-WH3.ini
 
 # The forwarder is built from the open-source fork and accompanies this experiment.
@@ -116,7 +127,7 @@ if ($null -ne $forwarder) {
 }
 
 @'
-WH3 Native DLSS5 Neural Rendering -> XeFG V18 integration experiment
+WH3 Native DLSS5 Neural Rendering -> XeFG V18.1 diagnostic experiment
 
 Source bases:
 - Dagherbou/OptiScaler_DLSSNR: 973761621353b99bee3dc7d4bb27b117fef2644f (v0.2.0-dlssnr source)
@@ -141,6 +152,12 @@ Packaged OptiScaler.ini is WH3-ready:
 - FGOutput=xefg
 - [Inputs] EnableDlssInputs=true
 - [Plugins] LoadReshade=true
+- [Log] LogToFile=true, LogLevel=2 (sparse INFO diagnostics; no per-frame DEBUG flood)
+
+V18.1 diagnostic markers (first 10, then every 300; all NR failures remain visible):
+- WH3 NR trace: native DLSS success -> EvaluateAfterUpscale enter/return
+- WH3 NR evaluate: selected backend + real feature-18 result
+- WH3 XeFG trace: Dispatch Ok
 
 Runtime prerequisites:
 - nvngx_dlssnr.dll must be supplied by the user; it is NVIDIA software and is NOT redistributed here.
@@ -154,5 +171,6 @@ Expected five-state validation after enabling FG:
 - Depth + MV: READY
 - XeFG: ACTIVE
 
+Instrumentation-only experiment. Rendering behavior is unchanged from V18.
 Experimental branch only. main and v0.1.0-rc1 remain unchanged.
 '@ | Set-Content -Encoding UTF8 package\README-V18-DLSSNR-TEST.txt
