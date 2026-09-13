@@ -1,0 +1,33 @@
+name: Build V17 ReShade post-FG runtime
+
+on:
+  push:
+    branches: [reshade-postfg-runtime]
+    paths:
+      - '.github/workflows/build-v17-reshade-postfg.yml'
+      - 'experiments/v17/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build V17 experiment
+        shell: powershell
+        run: .\experiments\v17\build.ps1
+
+      - name: Upload V17 experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: WH3-DLSS5-XeFG-V17-ReShade-PostFG
+          path: package
+          if-no-files-found: error
