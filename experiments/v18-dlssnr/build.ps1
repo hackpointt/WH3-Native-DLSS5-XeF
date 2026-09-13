@@ -27,8 +27,8 @@ Assert-NativeSuccess 'V17 ReShade transform'
 Write-Host 'Enabling DLSS Neural Rendering in packaged default configuration...'
 $iniPath = 'optiscaler-src\OptiScaler.ini'
 $ini = [System.IO.File]::ReadAllText($iniPath)
-if ($ini -notmatch '(?m)^\[DlssNr\]$') { throw '[DlssNr] section missing from fork OptiScaler.ini' }
-$ini2 = [regex]::Replace($ini, '(?ms)(^\[DlssNr\]\s*.*?^Enabled=)auto\s*$', '${1}true', 1)
+if ($ini -notmatch '(?m)^\[DlssNr\]\r?$') { throw '[DlssNr] section missing from fork OptiScaler.ini' }
+$ini2 = [regex]::Replace($ini, '(?ms)(^\[DlssNr\]\r?\n.*?^Enabled=)auto\r?$', '${1}true', 1)
 if ($ini2 -eq $ini) { throw 'Failed to switch [DlssNr] Enabled=auto to true' }
 [System.IO.File]::WriteAllText($iniPath, $ini2, (New-Object System.Text.UTF8Encoding($false)))
 
