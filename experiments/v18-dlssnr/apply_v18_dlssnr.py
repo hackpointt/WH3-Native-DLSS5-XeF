@@ -76,16 +76,15 @@ p.write_text(s, encoding='utf-8')
 
 
 # -----------------------------------------------------------------------------
-# V18.2 visibility probe: V17 made the hidden DX11 ReShade runtime observable,
-# which exposed a second ordering seam. In WH3's wrapper, the first DX11->D3D12
-# colour copy is recorded before the hidden DX11 Present. ReShade renders the
-# Feeder technique while that hidden Present is processed, so native DLSS/NR can
-# finish successfully after XeFG already captured the unmodified colour.
+# V18.3 Feeder visibility fix: V18.2 proved that the hidden DX11 ReShade runtime
+# renders DLSS5_Feed after the wrapper's first DX11->D3D12 colour copy. In WH3's
+# wrapper, that first copy is therefore the colour XeFG would otherwise consume;
+# native DLSS/NR can finish successfully after it.
 #
-# Keep the proven V15 path byte-for-byte identical while DebugView is Off. When
-# a non-zero NR debug view is selected, repeat only the interop colour copy after
-# the hidden Present. The NR debug shader is deliberately unmistakable, making
-# this an A/B ordering probe rather than a speculative production fix.
+# Repeat the interop colour copy after the hidden Present only while WH3's NR
+# output is actually enabled and applied. With NR disabled (or Apply the model
+# unchecked), the validated V15 path remains unchanged. The debug-view gate from
+# V18.2 is deliberately removed: normal NR output must reach XeFG too.
 # -----------------------------------------------------------------------------
 p = ROOT / 'OptiScaler/with_dx12/dx11_with_dx12_sc.cpp'
 s = p.read_text(encoding='utf-8-sig')
@@ -114,13 +113,15 @@ visibility_insert = '''    if (_real != nullptr)
             LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);
     }
 
-    // WH3 V18.2 visibility probe. The hidden Present above is where the normal
-    // D3D11 ReShade runtime renders DLSS5_Feed. With a debug view selected,
-    // recapture that post-Feeder colour before XeFG presents it. DebugView=Off
-    // leaves the validated V15/V18.1 path completely unchanged.
+    // WH3 V18.3 Feeder visibility fix. The hidden Present above is where the
+    // D3D11 ReShade runtime renders DLSS5_Feed. When DLSS-NR is enabled and its
+    // model edit is applied, recapture that post-Feeder colour before XeFG
+    // presents it. NR disabled / ApplyModel off leaves the validated V15 path
+    // unchanged; unlike V18.2 this is not limited to a debug view.
     const bool wh3PostFeederProbe =
         _stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
-        Config::Instance()->DlssNrDebugView.value_or_default() != 0;
+        Config::Instance()->DlssNrEnabled.value_or_default() &&
+        Config::Instance()->DlssNrApplyModel.value_or_default();
 
     if (wh3PostFeederProbe)
     {
@@ -130,7 +131,7 @@ visibility_insert = '''    if (_real != nullptr)
         const uint32_t debugView = Config::Instance()->DlssNrDebugView.value_or_default();
 
         if (trace)
-            LOG_INFO("WH3 Feeder visibility probe #{}: post-hidden-present recapture begin; debug view {}, dx11 index {}",
+            LOG_INFO("WH3 Feeder visibility probe #{}: post-hidden-present NR-on recapture begin; debug view {}, dx11 index {}",
                      probeId, debugView, dx11Index);
 
         const bool recaptured =
