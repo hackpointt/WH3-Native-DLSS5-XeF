@@ -1,4 +1,4 @@
-name: Build V18.1 DLSSNR diagnostics
+name: Build V18.2 Feeder visibility probe
 
 on:
   push:
@@ -23,13 +23,13 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build V18.1 DLSSNR diagnostics
+      - name: Build V18.2 Feeder visibility probe
         shell: powershell
         run: .\experiments\v18-dlssnr\build.ps1
 
-      - name: Upload V18.1 diagnostic experiment
+      - name: Upload V18.2 Feeder visibility probe
         uses: actions/upload-artifact@v4
         with:
-          name: WH3-DLSS5-NR-XeFG-V18.1-DIAGNOSTIC
+          name: WH3-DLSS5-NR-XeFG-V18.2-VISIBILITY-PROBE
           path: package
           if-no-files-found: error

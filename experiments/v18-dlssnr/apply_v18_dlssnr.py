@@ -76,6 +76,83 @@ p.write_text(s, encoding='utf-8')
 
 
 # -----------------------------------------------------------------------------
+# V18.2 visibility probe: V17 made the hidden DX11 ReShade runtime observable,
+# which exposed a second ordering seam. In WH3's wrapper, the first DX11->D3D12
+# colour copy is recorded before the hidden DX11 Present. ReShade renders the
+# Feeder technique while that hidden Present is processed, so native DLSS/NR can
+# finish successfully after XeFG already captured the unmodified colour.
+#
+# Keep the proven V15 path byte-for-byte identical while DebugView is Off. When
+# a non-zero NR debug view is selected, repeat only the interop colour copy after
+# the hidden Present. The NR debug shader is deliberately unmistakable, making
+# this an A/B ordering probe rather than a speculative production fix.
+# -----------------------------------------------------------------------------
+p = ROOT / 'OptiScaler/with_dx12/dx11_with_dx12_sc.cpp'
+s = p.read_text(encoding='utf-8-sig')
+
+visibility_anchor = '''    if (_real != nullptr)
+    {
+        UINT realFlags = Flags;
+
+        // Do not wait for it
+        auto realPresentResult = _real->Present(0, realFlags);
+
+        if (FAILED(realPresentResult))
+            LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);
+    }
+
+    auto result = _fgSwapChain->Present(SyncInterval, Flags);
+'''
+visibility_insert = '''    if (_real != nullptr)
+    {
+        UINT realFlags = Flags;
+
+        // Do not wait for it
+        auto realPresentResult = _real->Present(0, realFlags);
+
+        if (FAILED(realPresentResult))
+            LOG_WARN("hidden real DX11 Present failed: {:X}", (UINT) realPresentResult);
+    }
+
+    // WH3 V18.2 visibility probe. The hidden Present above is where the normal
+    // D3D11 ReShade runtime renders DLSS5_Feed. With a debug view selected,
+    // recapture that post-Feeder colour before XeFG presents it. DebugView=Off
+    // leaves the validated V15/V18.1 path completely unchanged.
+    const bool wh3PostFeederProbe =
+        _stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
+        Config::Instance()->DlssNrDebugView.value_or_default() != 0;
+
+    if (wh3PostFeederProbe)
+    {
+        static uint64_t wh3PostFeederProbeCounter = 0;
+        const uint64_t probeId = ++wh3PostFeederProbeCounter;
+        const bool trace = probeId <= 10 || (probeId % 300) == 0;
+        const uint32_t debugView = Config::Instance()->DlssNrDebugView.value_or_default();
+
+        if (trace)
+            LOG_INFO("WH3 Feeder visibility probe #{}: post-hidden-present recapture begin; debug view {}, dx11 index {}",
+                     probeId, debugView, dx11Index);
+
+        const bool recaptured =
+            _CopyDx11BackBufferToShared(dx11Index) &&
+            _WaitDx11ThenDx12() &&
+            _CopyDx11SharedToDx12FGBackBuffer(dx11Index) &&
+            _WaitForInteropCopyOnPresentQueue();
+
+        if (trace || !recaptured)
+            LOG_INFO("WH3 Feeder visibility probe #{}: post-hidden-present recapture {}",
+                     probeId, recaptured ? "SUCCESS" : "FAILED");
+    }
+
+    auto result = _fgSwapChain->Present(SyncInterval, Flags);
+'''
+if 'WH3 Feeder visibility probe #' not in s:
+    s = replace_once(s, visibility_anchor, visibility_insert, 'V18.2 post-Feeder visibility probe')
+
+p.write_text(s, encoding='utf-8')
+
+
+# -----------------------------------------------------------------------------
 # V18.1 sparse diagnostics: prove the native-DLSS -> NR call boundary without
 # changing when either operation runs.
 # -----------------------------------------------------------------------------

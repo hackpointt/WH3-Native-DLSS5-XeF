@@ -26,7 +26,7 @@ git submodule update --init --recursive
 Assert-NativeSuccess 'git submodule update'
 Set-Location ..
 
-Write-Host 'Applying fork-aware WH3 native-DLSS + XeFG integration...'
+Write-Host 'Applying fork-aware WH3 native-DLSS + XeFG V18.2 visibility probe...'
 python .\experiments\v18-dlssnr\apply_v18_dlssnr.py
 Assert-NativeSuccess 'V18 DLSSNR transform'
 
@@ -81,6 +81,12 @@ if ($xefg -notmatch 'WH3 XeFG compatibility: removed DXGI_USAGE_UNORDERED_ACCESS
 if ($xefg -notmatch 'xefgFullscreenDesc') { throw 'WH3 XeFG windowed fullscreen-desc fix missing' }
 if ($xefg -notmatch 'WH3 XeFG trace #') { throw 'Sparse XeFG success trace missing' }
 
+$interop = Get-Content 'OptiScaler\with_dx12\dx11_with_dx12_sc.cpp' -Raw
+if ($interop -notmatch 'WH3 Feeder visibility probe #') { throw 'Post-Feeder visibility probe missing' }
+if ($interop -notmatch 'DlssNrDebugView\.value_or_default\(\) != 0') {
+    throw 'Visibility probe is not safely gated behind a non-zero NR debug view'
+}
+
 $configText = Get-Content 'OptiScaler.ini' -Raw
 foreach ($required in @('Enabled=true', 'FGInput=upscaler', 'FGOutput=xefg', 'EnableDlssInputs=true', 'LoadReshade=true', 'LogToFile=true', 'LogLevel=2')) {
     if ($configText -notmatch [regex]::Escape($required)) { throw "WH3 packaged config missing $required" }
@@ -88,7 +94,7 @@ foreach ($required in @('Enabled=true', 'FGInput=upscaler', 'FGOutput=xefg', 'En
 
 git diff --check
 Assert-NativeSuccess 'git diff --check'
-git diff --binary HEAD | Out-File -Encoding utf8 '..\WH3-v18.1-dlssnr-diagnostic.patch'
+git diff --binary HEAD | Out-File -Encoding utf8 '..\WH3-v18.2-feeder-visibility-probe.patch'
 
 Write-Host 'Building Release x64...'
 msbuild /m /p:Configuration=Release . /verbosity:minimal
@@ -107,14 +113,15 @@ foreach ($marker in @(
     'Neural Rendering:',
     'WH3 NR trace #',
     'backend forwarder, feature18 result',
-    'WH3 XeFG trace #'
+    'WH3 XeFG trace #',
+    'WH3 Feeder visibility probe #'
 )) {
     if (-not $ascii.Contains($marker)) { throw "Missing compiled marker: $marker" }
 }
 
 New-Item -ItemType Directory -Force -Path package | Out-Null
 Copy-Item -Recurse -Force 'optiscaler-src\x64\Release\a\*' package\
-Copy-Item -Force 'WH3-v18.1-dlssnr-diagnostic.patch' package\
+Copy-Item -Force 'WH3-v18.2-feeder-visibility-probe.patch' package\
 Copy-Item -Force 'optiscaler-src\OptiScaler.ini' package\OptiScaler-DLSSNR-WH3.ini
 
 # The forwarder is built from the open-source fork and accompanies this experiment.
@@ -127,7 +134,7 @@ if ($null -ne $forwarder) {
 }
 
 @'
-WH3 Native DLSS5 Neural Rendering -> XeFG V18.1 diagnostic experiment
+WH3 Native DLSS5 Neural Rendering -> XeFG V18.2 Feeder visibility probe
 
 Source bases:
 - Dagherbou/OptiScaler_DLSSNR: 973761621353b99bee3dc7d4bb27b117fef2644f (v0.2.0-dlssnr source)
@@ -159,6 +166,13 @@ V18.1 diagnostic markers (first 10, then every 300; all NR failures remain visib
 - WH3 NR evaluate: selected backend + real feature-18 result
 - WH3 XeFG trace: Dispatch Ok
 
+V18.2 controlled visibility probe:
+- Debug view Off: rendering path is unchanged from V18.1/V15.
+- Any non-zero DLSS-NR Debug view: after the hidden DX11 Present runs ReShade/DLSS5_Feed,
+  repeat the DX11 -> D3D12 interop colour copy before the XeFG Present.
+- Expected if the ordering diagnosis is correct: Proxy, Raw model or Difference becomes immediately visible.
+- Log marker: WH3 Feeder visibility probe: post-hidden-present recapture SUCCESS/FAILED.
+
 Runtime prerequisites:
 - nvngx_dlssnr.dll must be supplied by the user; it is NVIDIA software and is NOT redistributed here.
 - nvngx.dll_dlssnr.dll is included from this source build.
@@ -171,6 +185,7 @@ Expected five-state validation after enabling FG:
 - Depth + MV: READY
 - XeFG: ACTIVE
 
-Instrumentation-only experiment. Rendering behavior is unchanged from V18.
+Diagnostic experiment. Rendering behavior changes only while a non-zero NR Debug view is selected.
+Return Debug view to Off to restore the V18.1/V15 colour path.
 Experimental branch only. main and v0.1.0-rc1 remain unchanged.
 '@ | Set-Content -Encoding UTF8 package\README-V18-DLSSNR-TEST.txt
