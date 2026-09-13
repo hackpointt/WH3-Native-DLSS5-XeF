@@ -6,6 +6,16 @@ function Assert-NativeSuccess([string] $step) {
     if ($LASTEXITCODE -ne 0) { throw "$step failed with exit code $LASTEXITCODE" }
 }
 
+function Set-IniValue([string] $text, [string] $section, [string] $key, [string] $value) {
+    $sec = [regex]::Escape($section)
+    $k = [regex]::Escape($key)
+    $pattern = "(?ms)(^\[$sec\]\r?\n.*?^$k=)[^\r\n]*"
+    $rx = [regex]::new($pattern)
+    $m = $rx.Match($text)
+    if (-not $m.Success) { throw "Missing INI key [$section] $key" }
+    return $rx.Replace($text, { param($match) $match.Groups[1].Value + $value }, 1)
+}
+
 Write-Host 'Cloning OptiScaler_DLSSNR fork...'
 git clone --recursive https://github.com/Dagherbou/OptiScaler_DLSSNR.git optiscaler-src
 Assert-NativeSuccess 'git clone'
@@ -24,13 +34,16 @@ Write-Host 'Applying validated V17 post-FG ReShade runtime experiment...'
 python .\experiments\v17\apply_v17.py
 Assert-NativeSuccess 'V17 ReShade transform'
 
-Write-Host 'Enabling DLSS Neural Rendering in packaged default configuration...'
+Write-Host 'Preparing WH3 V18 configuration...'
 $iniPath = 'optiscaler-src\OptiScaler.ini'
 $ini = [System.IO.File]::ReadAllText($iniPath)
-if ($ini -notmatch '(?m)^\[DlssNr\]\r?$') { throw '[DlssNr] section missing from fork OptiScaler.ini' }
-$ini2 = [regex]::Replace($ini, '(?ms)(^\[DlssNr\]\r?\n.*?^Enabled=)auto\r?$', '${1}true', 1)
-if ($ini2 -eq $ini) { throw 'Failed to switch [DlssNr] Enabled=auto to true' }
-[System.IO.File]::WriteAllText($iniPath, $ini2, (New-Object System.Text.UTF8Encoding($false)))
+$ini = Set-IniValue $ini 'DlssNr' 'Enabled' 'true'
+$ini = Set-IniValue $ini 'FrameGen' 'Enabled' 'false'
+$ini = Set-IniValue $ini 'FrameGen' 'FGInput' 'upscaler'
+$ini = Set-IniValue $ini 'FrameGen' 'FGOutput' 'xefg'
+$ini = Set-IniValue $ini 'Inputs' 'EnableDlssInputs' 'true'
+$ini = Set-IniValue $ini 'Plugins' 'LoadReshade' 'true'
+[System.IO.File]::WriteAllText($iniPath, $ini, (New-Object System.Text.UTF8Encoding($false)))
 
 Set-Location optiscaler-src
 Write-Host 'Checking integration invariants...'
@@ -60,6 +73,11 @@ $xefg = Get-Content 'OptiScaler\framegen\xefg\XeFG_Dx12.cpp' -Raw
 if ($xefg -notmatch 'WH3 XeFG compatibility: removed DXGI_USAGE_UNORDERED_ACCESS') { throw 'WH3 XeFG UAV fix missing' }
 if ($xefg -notmatch 'xefgFullscreenDesc') { throw 'WH3 XeFG windowed fullscreen-desc fix missing' }
 
+$configText = Get-Content 'OptiScaler.ini' -Raw
+foreach ($required in @('Enabled=true', 'FGInput=upscaler', 'FGOutput=xefg', 'EnableDlssInputs=true', 'LoadReshade=true')) {
+    if ($configText -notmatch [regex]::Escape($required)) { throw "WH3 packaged config missing $required" }
+}
+
 git diff --check
 Assert-NativeSuccess 'git diff --check'
 git diff --binary HEAD | Out-File -Encoding utf8 '..\WH3-v18-dlssnr-xefg.patch'
@@ -88,13 +106,13 @@ Copy-Item -Recurse -Force 'optiscaler-src\x64\Release\a\*' package\
 Copy-Item -Force 'WH3-v18-dlssnr-xefg.patch' package\
 Copy-Item -Force 'optiscaler-src\OptiScaler.ini' package\OptiScaler-DLSSNR-WH3.ini
 
-# The forwarder is redistributable source/output from the fork and should accompany the build.
+# The forwarder is built from the open-source fork and accompanies this experiment.
 $forwarder = Get-ChildItem -Path 'optiscaler-src' -Filter 'nvngx.dll_dlssnr.dll' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $forwarder) {
     Copy-Item -Force $forwarder.FullName package\nvngx.dll_dlssnr.dll
     Write-Host "Packaged DLSSNR forwarder from $($forwarder.FullName)"
 } else {
-    Write-Warning 'nvngx.dll_dlssnr.dll was not found in source build output; runtime test will need the forwarder from Dagherbou v0.2.0 package.'
+    throw 'nvngx.dll_dlssnr.dll was not produced by the DLSSNR fork build'
 }
 
 @'
@@ -106,7 +124,8 @@ Source bases:
 - WH3 V17 post-FG ReShade UI runtime
 
 Render order under test:
-DLSS5-Feeder -> native NVIDIA D3D12 DLSS -> DLSS Neural Rendering -> private Depth/MV bridge -> XeFG -> post-FG ReShade UI
+DLSS5-Feeder -> native NVIDIA D3D12 DLSS -> DLSS Neural Rendering -> XeFG -> post-FG ReShade UI
+The private WH3 shadow only supplies Depth/MV metadata/resources to OptiFG; it never evaluates an upscaler.
 
 Safety invariants:
 - ShortFuse/DLSS5-Feeder keeps the real native NGX handle and result.
@@ -115,13 +134,20 @@ Safety invariants:
 - DlssNr::EvaluateAfterUpscale executes only after a successful native NVIDIA DLSS Evaluate.
 - V17 UI remains lazy: the explicit final-presenter ReShade runtime is created only after Home is pressed.
 
+Packaged OptiScaler.ini is WH3-ready:
+- [DlssNr] Enabled=true
+- [FrameGen] Enabled=false (start safe; turn Active on in OptiScaler after entering a 3D scene)
+- FGInput=upscaler
+- FGOutput=xefg
+- [Inputs] EnableDlssInputs=true
+- [Plugins] LoadReshade=true
+
 Runtime prerequisites:
 - nvngx_dlssnr.dll must be supplied by the user; it is NVIDIA software and is NOT redistributed here.
-- nvngx.dll_dlssnr.dll from the DLSSNR fork must be present.
-- [DlssNr] Enabled=true (the included OptiScaler-DLSSNR-WH3.ini has this enabled).
+- nvngx.dll_dlssnr.dll is included from this source build.
 - RTSS and NVIDIA Smooth Motion OFF during isolation testing.
 
-Expected five-state validation:
+Expected five-state validation after enabling FG:
 - DLSS5 feeder: DETECTED
 - Native DLSS NGX: ACTIVE
 - Neural Rendering: ACTIVE
