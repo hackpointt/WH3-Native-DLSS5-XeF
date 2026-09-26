@@ -1,0 +1,30 @@
+name: Build WH3 DLSS-NR MFG experiment
+
+on:
+  push:
+    branches: [experiment/wh3-dlssnr-mfg-20260926]
+    paths:
+      - '.github/workflows/build-wh3-dlssnr-mfg.yml'
+      - 'experiments/mfg-dlssnr/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout experiment
+        uses: actions/checkout@v4
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+      - name: Build fork-aware neural rendering and MFG
+        shell: powershell
+        run: .\experiments\mfg-dlssnr\build.ps1
+      - name: Upload experiment
+        uses: actions/upload-artifact@v4
+        with:
+          name: WH3-DLSS5-NR-MFG-TWO-STAGE
+          path: package
+          if-no-files-found: error
