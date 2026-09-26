@@ -2,6 +2,8 @@
 
 [English](README.md) · [下载 RC1](https://github.com/hackpointt/WH3-Native-DLSS5-XeF/releases/tag/v0.1.0-rc1)
 
+2026-09-26 的 DLSS5 + 4× MFG 排障、实测与回退经过见[完整记录](docs/WH3-DLSS5-MFG-investigation-2026-09-26.zh-CN.md)。该实验版已因用户反馈“尾音较重”回退到 DLSS5 + XeFG 基线。
+
 这是一个实验性兼容包：**保留 ShortFuse / NVIDIA 原生 DLSS5 作为超分辨率链路**，同时从 native D3D12 DLSS 调用中取得 **Depth + Motion Vectors**，桥接给 **OptiFG → Intel XeFG** 做帧生成。
 
 这不是 Creative Assembly、SEGA、NVIDIA、Intel、ReShade、ShortFuse 或 OptiScaler 的官方版本。
