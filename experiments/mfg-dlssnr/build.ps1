@@ -44,7 +44,7 @@ if ($interop -notmatch 'WH3 DLSSG two-stage') { throw 'Two-stage DLSSG transitio
 $menu = Get-Content 'OptiScaler\menu\menu_common.cpp' -Raw
 if ($menu -notmatch 'Neural Rendering:') { throw 'Neural Rendering status missing' }
 
-$iniPath = 'OptiScaler.ini'
+$iniPath = (Resolve-Path 'OptiScaler.ini').Path
 $ini = [System.IO.File]::ReadAllText($iniPath)
 $ini = Set-IniValue $ini 'DlssNr' 'Enabled' 'true'
 $ini = Set-IniValue $ini 'FrameGen' 'Enabled' 'true'
