@@ -35,7 +35,7 @@ foreach ($marker in @(
     'WH3 native DLSS bridge: private shadow active',
     'WH3 XeFG compatibility:',
     'WH3 DLSSG compatibility:',
-    'WH3 DLSSG deferred activation:'
+    'WH3 DLSSG two-stage:'
 )) {
     if (-not $ascii.Contains($marker)) { throw "Missing compiled marker: $marker" }
 }
@@ -44,12 +44,13 @@ New-Item -ItemType Directory -Force package | Out-Null
 Copy-Item -Recurse -Force 'optiscaler-src\x64\Release\a\*' package\
 Copy-Item -Force 'experiments\mfg\wh3-dlss5-xefg-dlssg-mfg.patch' package\
 @"
-Experimental WH3 DLSS-G startup-order candidate
+Experimental WH3 DLSS-G two-stage swapchain candidate
 OptiScaler base: $baseCommit
 The DLSS-G swapchain creation fix previously compiled and created a swapchain,
 but DLSS5 Feed failed during native DLSS CreateFeature while DLSS-G was active.
-This revision creates the Streamline swapchain, pauses DLSS-G until the first
-successful native DLSS Evaluate, then resumes it on the DX11/DX12 present path.
+This revision starts with a plain DX12 presenter. After the first successful
+native DLSS Evaluate, it waits for the queues and recreates the presenter as
+a Streamline DLSS-G swapchain. If that fails, it attempts to restore plain DX12.
 No 3D game test has been performed for this revision.
 Preserve the existing stable DLSS5 + XeFG baseline when testing.
 "@ | Set-Content -Encoding UTF8 package\README-MFG-EXPERIMENT.txt

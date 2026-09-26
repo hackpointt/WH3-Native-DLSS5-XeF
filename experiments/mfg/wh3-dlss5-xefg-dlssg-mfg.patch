@@ -1,5 +1,5 @@
 diff --git a/OptiScaler/State.h b/OptiScaler/State.h
-index 8c37399..e038edf 100644
+index 8c37399..50a2ceb 100644
 --- a/OptiScaler/State.h
 +++ b/OptiScaler/State.h
 @@ -10,6 +10,7 @@
@@ -10,20 +10,19 @@ index 8c37399..e038edf 100644
  #include <sl_dlss_g.h>
  #include <vulkan/vulkan.h>
  #include <ankerl/unordered_dense.h>
-@@ -162,6 +163,11 @@ class State
+@@ -162,6 +163,10 @@ class State
      // FG
      uint64_t fgLastFrame = 0;
  
 +    // WH3 native-DLSS -> OptiFG compatibility status. Updated only after a
 +    // successful native NVIDIA D3D12 DLSS EvaluateFeature call.
 +    std::atomic<uint64_t> wh3NativeDlssLastSuccessTick { 0 };
-+    std::atomic<bool> wh3DlssgDeferredActivation { false };
 +
      // Nvngx FG, uses streamline swapchain
      bool nukemsFgFileAvailable = false;
      bool artursFgFileAvailable = false;
 diff --git a/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp b/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp
-index 0e25432..cb900a9 100644
+index 0e25432..afb0344 100644
 --- a/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp
 +++ b/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp
 @@ -51,6 +51,26 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
@@ -53,24 +52,6 @@ index 0e25432..cb900a9 100644
      IDXGIFactory* slFactory = nullptr;
      if (!Util::CheckForRealObject(__FUNCTION__, factory, (IUnknown**) &slFactory))
      {
-@@ -89,6 +109,17 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
-         _supportsDMFG = dlssgState.bIsDynamicMFGSupported == sl::Boolean::eTrue;
-     }
- 
-+    // Keep the Streamline swapchain proxy created above, then pause DLSS-G
-+    // while WH3's private DLSS5 Feed device creates and evaluates native DLSS.
-+    // The DX11/DX12 present path resumes DLSS-G after that first evaluation.
-+    if (wh3DlssgCompat)
-+    {
-+        const auto deferred = StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, false);
-+        State::Instance().wh3DlssgDeferredActivation.store(deferred == sl::Result::eOk,
-+                                                            std::memory_order_relaxed);
-+        LOG_INFO("WH3 DLSSG deferred activation: disable after swapchain result {}", (int) deferred);
-+    }
-+
-     _gameCommandQueue = cmdQueue;
-     _swapChain = *swapChain;
-     _hwnd = desc->OutputWindow;
 diff --git a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
 index a60ca66..287218b 100644
 --- a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
@@ -119,6 +100,88 @@ index a60ca66..287218b 100644
  
      if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
      {
+diff --git a/OptiScaler/hooks/DxgiFactory_Hooks.cpp b/OptiScaler/hooks/DxgiFactory_Hooks.cpp
+index a27811f..f199595 100644
+--- a/OptiScaler/hooks/DxgiFactory_Hooks.cpp
++++ b/OptiScaler/hooks/DxgiFactory_Hooks.cpp
+@@ -395,6 +395,24 @@ void DxgiFactoryHooks::HookToDLSSGFactory(IDXGIFactory* pFactory)
+     DetourTransactionCommit();
+ }
+ 
++HRESULT DxgiFactoryHooks::CreatePlainDx12InteropSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
++                                                           DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain)
++{
++    if (o_CreateSwapChain == nullptr || factory == nullptr || queue == nullptr || desc == nullptr ||
++        swapChain == nullptr)
++        return E_INVALIDARG;
++
++    ScopedSkipParentWrapping skipParentWrapping {};
++    return o_CreateSwapChain(factory, queue, desc, swapChain);
++}
++
++HRESULT DxgiFactoryHooks::CreateFgDx12InteropSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
++                                                        DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain)
++{
++    ScopedSkipFGSCCreation skipFGSCCreation {};
++    return FGHooks::CreateSwapChain(factory, queue, desc, swapChain);
++}
++
+ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc,
+                                           IDXGISwapChain** ppSwapChain)
+ {
+@@ -592,17 +610,27 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
+                     IDXGISwapChain* fgSwapChain = nullptr;
+                     IDXGISwapChain4* fgSwapChain4 = nullptr;
+                     bool fgSwapChainIsRealFG = false;
++                    const bool wh3TwoStageDlssg =
++                        _stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
++                        State::Instance().activeFgOutput == FGOutput::DLSSG;
+                     const bool tearingSupported = IsTearingSupported(realFactory);
+ 
+                     if (SUCCEEDED(realScResult) && PrepareDx12InteropDesc(fgDesc, tearingSupported))
+                     {
++                        if (wh3TwoStageDlssg)
++                        {
++                            fgScResult = CreatePlainDx12InteropSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
++                            LOG_INFO("WH3 DLSSG two-stage: initial plain DX12 swapchain result {:X}",
++                                     (UINT) fgScResult);
++                        }
++                        else
+                         {
+                             ScopedSkipFGSCCreation skipFGSCCreation {};
+                             fgScResult = FGHooks::CreateSwapChain(realFactory, dx12Queue, &fgDesc, &fgSwapChain);
+                             fgSwapChainIsRealFG = SUCCEEDED(fgScResult) && fgSwapChain != nullptr;
+                         }
+ 
+-                        if (FAILED(fgScResult) || fgSwapChain == nullptr)
++                        if (!wh3TwoStageDlssg && (FAILED(fgScResult) || fgSwapChain == nullptr))
+                         {
+                             fgSwapChainIsRealFG = false;
+ 
+@@ -631,7 +659,7 @@ HRESULT DxgiFactoryHooks::CreateSwapChain(IDXGIFactory* realFactory, IUnknown* p
+                             FGHooks::SetDx12InteropPresentSC(fgSwapChain4, localDesc.OutputWindow);
+ 
+                         *ppSwapChain = new Dx11wDx12SC(realDx11SwapChain, fgSwapChain4, device, localDesc.OutputWindow,
+-                                                       localDesc.Flags);
++                                                       localDesc.Flags, wh3TwoStageDlssg ? realFactory : nullptr);
+ 
+                         State::Instance().currentSwapchain = *ppSwapChain;
+                         State::Instance().currentWrappedSwapchain = *ppSwapChain;
+diff --git a/OptiScaler/hooks/DxgiFactory_Hooks.h b/OptiScaler/hooks/DxgiFactory_Hooks.h
+index b67def3..8cf9808 100644
+--- a/OptiScaler/hooks/DxgiFactory_Hooks.h
++++ b/OptiScaler/hooks/DxgiFactory_Hooks.h
+@@ -10,6 +10,10 @@ class DxgiFactoryHooks
+   public:
+     static void HookToFactory(IDXGIFactory* pFactory);
+     static void HookToDLSSGFactory(IDXGIFactory* pFactory);
++    static HRESULT CreatePlainDx12InteropSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
++                                                    DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain);
++    static HRESULT CreateFgDx12InteropSwapChain(IDXGIFactory* factory, ID3D12CommandQueue* queue,
++                                                 DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain);
+ 
+   private:
+     using PFN_EnumAdapterByGpuPreference =
 diff --git a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp b/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
 index 68e1b42..d650015 100644
 --- a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
@@ -360,10 +423,18 @@ index 02b63ff..57ae52b 100644
          else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady())
          {
 diff --git a/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp b/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp
-index c4277ad..5bdd7ef 100644
+index c4277ad..fe84da5 100644
 --- a/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp
 +++ b/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp
-@@ -12,6 +12,7 @@
+@@ -5,6 +5,7 @@
+ #include <with_dx12/dx11_with_dx12_sync.h>
+ 
+ #include <hooks/FG_Hooks.h>
++#include <hooks/DxgiFactory_Hooks.h>
+ #include <menu/menu_overlay_dx.h>
+ 
+ #include <hudfix/Hudfix_Dx11.h>
+@@ -12,6 +13,7 @@
  
  #include <Util.h>
  #include <Config.h>
@@ -371,21 +442,190 @@ index c4277ad..5bdd7ef 100644
  
  #include <d3d11.h>
  #include <d3d11_4.h>
-@@ -366,6 +367,17 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
+@@ -139,8 +141,10 @@ bool IsSame(IDXGISwapChain* swapchain, UINT bufferCount, UINT width, UINT height
+ }
+ } // namespace
+ 
+-Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags)
+-    : _real(real), _fgSwapChain(fgSC), _dx11Device(pDevice), _handle(hWnd), _refcount(1)
++Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags,
++                         IDXGIFactory* deferredFactory)
++    : _real(real), _fgSwapChain(fgSC), _deferredFactory(deferredFactory), _dx11Device(pDevice), _handle(hWnd),
++      _refcount(1)
+ {
+     _id = ++scCount;
+     _lastFlags = flags;
+@@ -157,6 +161,9 @@ Dx11wDx12SC::Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Devi
+     if (_fgSwapChain != nullptr)
+         _fgSwapChain->AddRef();
+ 
++    if (_deferredFactory != nullptr)
++        _deferredFactory->AddRef();
++
+     if (_dx11Device != nullptr)
+     {
+         _dx11Device->AddRef();
+@@ -207,6 +214,7 @@ Dx11wDx12SC::~Dx11wDx12SC()
+     SafeRelease(_real2);
+     SafeRelease(_real1);
+     SafeRelease(_fgSwapChain);
++    SafeRelease(_deferredFactory);
+     SafeRelease(_real);
+     SafeRelease(_dx11Context4);
+     SafeRelease(_dx11Context);
+@@ -355,6 +363,97 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::GetDevice(REFIID riid, void** ppDevice)
+     return _real != nullptr ? _real->GetDevice(riid, ppDevice) : DXGI_ERROR_DEVICE_REMOVED;
+ }
+ 
++void Dx11wDx12SC::_TryActivateWh3Dlssg()
++{
++    if (_deferredFactory == nullptr || _wh3DlssgAttempted || _fgSwapChain == nullptr ||
++        _dx12Device == nullptr || _dx12CommandQueue == nullptr ||
++        State::Instance().wh3NativeDlssLastSuccessTick.load(std::memory_order_relaxed) == 0)
++        return;
++
++    _wh3DlssgAttempted = true;
++    LOG_INFO("WH3 DLSSG two-stage: native DLSS evaluated; recreating presenter with Streamline");
++
++    DXGI_SWAP_CHAIN_DESC desc {};
++    if (FAILED(_fgSwapChain->GetDesc(&desc)))
++    {
++        LOG_ERROR("WH3 DLSSG two-stage: could not read plain presenter descriptor");
++        return;
++    }
++
++    if (!_WaitForCopyQueueIdle())
++    {
++        LOG_ERROR("WH3 DLSSG two-stage: interop copy queue did not become idle");
++        return;
++    }
++
++    ID3D12Fence* presentFence = nullptr;
++    const auto fenceResult = _dx12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&presentFence));
++    HANDLE presentEvent = SUCCEEDED(fenceResult) ? CreateEvent(nullptr, FALSE, FALSE, nullptr) : nullptr;
++    UINT64 fenceValue = 0;
++    const bool presentIdle = presentFence != nullptr && presentEvent != nullptr &&
++                             WaitForQueueIdle(_dx12CommandQueue, presentFence, presentEvent, fenceValue);
++    SafeRelease(presentFence);
++    SafeCloseHandle(presentEvent);
++    if (!presentIdle)
++    {
++        LOG_ERROR("WH3 DLSSG two-stage: present queue did not become idle");
++        return;
++    }
++
++    MenuOverlayDx::CleanupRenderTarget(true, _handle);
++    _ReleaseInteropObjects();
++    FGHooks::ClearDx12InteropPresentSC(_fgSwapChain);
++    State::Instance().currentFGSwapchain = nullptr;
++    SafeRelease(_fgSwapChain);
++
++    IDXGISwapChain* replacement = nullptr;
++    auto result = DxgiFactoryHooks::CreateFgDx12InteropSwapChain(_deferredFactory, _dx12CommandQueue, &desc,
++                                                                   &replacement);
++    if (SUCCEEDED(result) && replacement != nullptr)
++    {
++        result = replacement->QueryInterface(IID_PPV_ARGS(&_fgSwapChain));
++        replacement->Release();
++        replacement = nullptr;
++    }
++
++    if (FAILED(result) || _fgSwapChain == nullptr)
++    {
++        LOG_ERROR("WH3 DLSSG two-stage: Streamline presenter failed {:X}; restoring plain DX12 presenter",
++                  (UINT) result);
++        if (replacement != nullptr)
++            replacement->Release();
++
++        result = DxgiFactoryHooks::CreatePlainDx12InteropSwapChain(_deferredFactory, _dx12CommandQueue, &desc,
++                                                                    &replacement);
++        if (SUCCEEDED(result) && replacement != nullptr)
++        {
++            result = replacement->QueryInterface(IID_PPV_ARGS(&_fgSwapChain));
++            replacement->Release();
++        }
++        if (SUCCEEDED(result) && _fgSwapChain != nullptr)
++        {
++            FGHooks::SetDx12InteropPresentSC(_fgSwapChain, _handle);
++            State::Instance().currentFGSwapchain = _fgSwapChain;
++            LOG_INFO("WH3 DLSSG two-stage: plain presenter restored; frame generation remains off");
++        }
++        else
++        {
++            LOG_ERROR("WH3 DLSSG two-stage: plain presenter recovery failed {:X}", (UINT) result);
++        }
++    }
++    else
++    {
++        _fg = State::Instance().currentFG;
++        State::Instance().currentFGSwapchain = _fgSwapChain;
++        LOG_INFO("WH3 DLSSG two-stage: Streamline presenter active after native DLSS success");
++    }
++
++    State::Instance().currentSwapchain = this;
++    State::Instance().currentWrappedSwapchain = this;
++    State::Instance().currentSwapchainDesc = desc;
++    _RefreshCachedSwapchainDesc();
++}
++
+ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
+ {
+     if (_real == nullptr || _fgSwapChain == nullptr)
+@@ -366,6 +465,9 @@ HRESULT STDMETHODCALLTYPE Dx11wDx12SC::Present(UINT SyncInterval, UINT Flags)
      if ((Flags & DXGI_PRESENT_TEST) != 0)
          return _real->Present(SyncInterval, Flags);
  
 +    auto& state = State::Instance();
-+    if (state.wh3DlssgDeferredActivation.load(std::memory_order_relaxed) &&
-+        state.wh3NativeDlssLastSuccessTick.load(std::memory_order_relaxed) != 0 &&
-+        state.activeFgOutput == FGOutput::DLSSG && StreamlineProxy::SetFeatureLoaded() != nullptr)
-+    {
-+        const auto result = StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, true);
-+        LOG_INFO("WH3 DLSSG deferred activation: native DLSS ready, enable result {}", (int) result);
-+        if (result == sl::Result::eOk)
-+            state.wh3DlssgDeferredActivation.store(false, std::memory_order_relaxed);
-+    }
++    _TryActivateWh3Dlssg();
 +
      const bool dx11HudfixPresent = Config::Instance()->FGHUDFix.value_or_default() &&
                                     State::Instance().activeFgInput == FGInput::Upscaler &&
                                     State::Instance().swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
+@@ -1233,13 +1335,14 @@ bool Dx11wDx12SC::_CopyDx11SharedToDx12FGBackBuffer(UINT dx11Index)
+ 
+ bool Dx11wDx12SC::_WaitForInteropCopyOnPresentQueue()
+ {
+-    if (_fg == nullptr || _copyFence == nullptr)
++    auto* presentQueue = _fg != nullptr ? _fg->GetCommandQueue() : _dx12CommandQueue;
++    if (presentQueue == nullptr || _copyFence == nullptr)
+         return false;
+ 
+     if (_lastInteropCopyFenceValue == 0)
+         return true;
+ 
+-    auto result = _fg->GetCommandQueue()->Wait(_copyFence, _lastInteropCopyFenceValue);
++    auto result = presentQueue->Wait(_copyFence, _lastInteropCopyFenceValue);
+     if (FAILED(result))
+     {
+         LOG_ERROR("present queue Wait on interop copy fence failed: {:X}", (UINT) result);
+diff --git a/OptiScaler/with_dx12/dx11_with_dx12_sc.h b/OptiScaler/with_dx12/dx11_with_dx12_sc.h
+index 481ffc7..af4bb36 100644
+--- a/OptiScaler/with_dx12/dx11_with_dx12_sc.h
++++ b/OptiScaler/with_dx12/dx11_with_dx12_sc.h
+@@ -14,7 +14,8 @@ using Microsoft::WRL::ComPtr;
+ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final : public IDXGISwapChain4
+ {
+   public:
+-    Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags);
++    Dx11wDx12SC(IDXGISwapChain* real, IDXGISwapChain4* fgSC, ID3D11Device* pDevice, HWND hWnd, UINT flags,
++                 IDXGIFactory* deferredFactory = nullptr);
+     virtual ~Dx11wDx12SC();
+ 
+     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override;
+@@ -85,6 +86,7 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final :
+     UINT _GetDx11BackBufferIndexForPresent() const;
+     void _AdvanceFakeBackBufferIndex();
+     bool _WaitForInteropCopyOnPresentQueue();
++    void _TryActivateWh3Dlssg();
+ 
+     IDXGISwapChain* _real = nullptr;
+     IDXGISwapChain1* _real1 = nullptr;
+@@ -93,6 +95,8 @@ class DECLSPEC_UUID("23b064bb-482d-416c-93b1-829acedfb3d0") Dx11wDx12SC final :
+     IDXGISwapChain4* _real4 = nullptr;
+ 
+     IDXGISwapChain4* _fgSwapChain = nullptr;
++    IDXGIFactory* _deferredFactory = nullptr;
++    bool _wh3DlssgAttempted = false;
+ 
+     int _id = 0;
+     LONG _refcount = 1;

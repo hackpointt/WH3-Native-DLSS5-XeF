@@ -11,3 +11,7 @@ The identical OptiScaler DLL switched to XeFG instead of DLSS-G succeeds: DLSS5 
 An attempted delay unloaded `sl::kFeatureDLSS_G` **after** constructing its swapchain and requested reload after the first successful native DLSS evaluation. The unload returned `eOk`, but the Feed still failed during `CreateFeature` before that success point. This delayed-load patch is a failed diagnostic experiment, not a fix. NVIDIA's [Streamline programming guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md) specifies that switching between a native and DLSS-G proxy swapchain requires releasing and recreating the swapchain with the feature in the corresponding loaded state.
 
 The game installation was restored to the pre-experiment DLL and INI hashes after each failed test. Local logs and snapshots are under `D:\DLSS5-Audit\2026-09-25-refresh`.
+
+## Next candidate: two-stage swapchain
+
+The current branch now contains an untested successor to the failed delayed-load patch. For WH3's legacy DXGI swapchain path, it starts with an ordinary DX12 presenter so the DLSS5 Feed can initialize. After the first successful native DLSS evaluation, it waits for both queues, releases the plain presenter and interop resources, and creates a new Streamline DLSS-G presenter. If creation fails, it attempts to restore the ordinary presenter. This is an experimental build candidate; successful compilation does not establish runtime compatibility or 4× output. The validated game installation remains untouched until a separate test is arranged.
