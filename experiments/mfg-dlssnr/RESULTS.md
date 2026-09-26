@@ -6,6 +6,6 @@ The first local 3D-scene run used the fork-aware DLSS-NR source and a deferred S
 
 Only after native DLSS and Neural Rendering had evaluated did the two-stage presenter load Streamline and recreate the swapchain. The Streamline DLSS-G plugin reported support for up to five generated frames, accepted interpolation count 3, and logged four transitions to `eOn, numFramesToGenerate=3` during the run. The last enabled interval lasted about 30 seconds before the user exited. No OptiScaler error lines or Feed evaluate crash appeared in the saved logs.
 
-This establishes concurrent Neural Rendering and an active 4× DLSS-G request at runtime. It does **not** measure the actual display-output frame count or settle visual quality and frame pacing. User assessment of the 3D scene is pending.
+This establishes concurrent Neural Rendering and an active 4× DLSS-G request at runtime. The user confirmed that the artifact-battle scene looked normal and controls responded normally. The logs do **not** directly measure display-output frame count or long-session frame pacing, so `eOn, numFramesToGenerate=3` is the evidence for active 4× generation rather than an external FPS measurement.
 
 Local evidence: `D:\DLSS5-Audit\2026-09-25-refresh\dlssnr-mfg-combined-run-20260926`. The predeployment stable DLSS5 + XeFG files are backed up at `D:\DLSS5-Audit\2026-09-25-refresh\dlssnr-mfg-predeploy-20260926`.
