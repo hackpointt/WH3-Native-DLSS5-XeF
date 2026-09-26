@@ -1,0 +1,50 @@
+$ErrorActionPreference = 'Stop'
+$baseCommit = '20d9d147a4334a49a99d67d235ad7915e0d6d846'
+
+function Assert-Success([string] $step) {
+    if ($LASTEXITCODE -ne 0) { throw "$step failed with exit code $LASTEXITCODE" }
+}
+
+git clone https://github.com/optiscaler/OptiScaler.git optiscaler-src
+Assert-Success 'git clone'
+Push-Location optiscaler-src
+try {
+    git checkout $baseCommit
+    Assert-Success 'git checkout'
+    git submodule update --init --recursive
+    Assert-Success 'git submodule update'
+
+    git apply --check ..\experiments\mfg\wh3-dlss5-xefg-dlssg-mfg.patch
+    Assert-Success 'git apply --check'
+    git apply ..\experiments\mfg\wh3-dlss5-xefg-dlssg-mfg.patch
+    Assert-Success 'git apply'
+    git diff --check
+    Assert-Success 'git diff --check'
+
+    msbuild /m /p:Configuration=Release . /verbosity:minimal
+    Assert-Success 'MSBuild'
+} finally {
+    Pop-Location
+}
+
+$dll = 'optiscaler-src\x64\Release\a\OptiScaler.dll'
+if (-not (Test-Path $dll)) { throw 'Compiled OptiScaler.dll missing' }
+$ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll))
+foreach ($marker in @(
+    'WH3 native DLSS passthrough:',
+    'WH3 native DLSS bridge: private shadow active',
+    'WH3 XeFG compatibility:',
+    'WH3 DLSSG compatibility:'
+)) {
+    if (-not $ascii.Contains($marker)) { throw "Missing compiled marker: $marker" }
+}
+
+New-Item -ItemType Directory -Force package | Out-Null
+Copy-Item -Recurse -Force 'optiscaler-src\x64\Release\a\*' package\
+Copy-Item -Force 'experiments\mfg\wh3-dlss5-xefg-dlssg-mfg.patch' package\
+@"
+Experimental WH3 DLSS-G swapchain candidate
+OptiScaler base: $baseCommit
+The candidate has compiled, but no 3D game test has been performed.
+Preserve the existing stable DLSS5 + XeFG baseline when testing.
+"@ | Set-Content -Encoding UTF8 package\README-MFG-EXPERIMENT.txt

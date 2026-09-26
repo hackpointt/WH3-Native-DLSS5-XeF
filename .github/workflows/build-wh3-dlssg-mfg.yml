@@ -1,0 +1,28 @@
+name: Build WH3 DLSS-G MFG experiment
+
+on:
+  push:
+    branches: [experiment/wh3-dlssg-mfg-20260926]
+    paths:
+      - '.github/workflows/build-wh3-dlssg-mfg.yml'
+      - 'experiments/mfg/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build candidate
+        shell: powershell
+        run: .\experiments\mfg\build.ps1
+      - name: Upload candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: WH3-DLSS5-XeFG-DLSSG-MFG-experiment
+          path: package
+          if-no-files-found: error
