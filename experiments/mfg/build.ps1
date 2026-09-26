@@ -48,9 +48,10 @@ Experimental WH3 DLSS-G two-stage swapchain candidate
 OptiScaler base: $baseCommit
 The DLSS-G swapchain creation fix previously compiled and created a swapchain,
 but DLSS5 Feed failed during native DLSS CreateFeature while DLSS-G was active.
-This revision starts with a plain DX12 presenter. After the first successful
-native DLSS Evaluate, it waits for the queues and recreates the presenter as
-a Streamline DLSS-G swapchain. If that fails, it attempts to restore plain DX12.
+This revision starts with a plain DX12 presenter and defers OptiScaler's
+Streamline load until native DLSS evaluates successfully. It then waits for
+the queues and recreates the presenter as a Streamline DLSS-G swapchain.
+If that fails, it attempts to restore plain DX12.
 No 3D game test has been performed for this revision.
 Preserve the existing stable DLSS5 + XeFG baseline when testing.
 "@ | Set-Content -Encoding UTF8 package\README-MFG-EXPERIMENT.txt

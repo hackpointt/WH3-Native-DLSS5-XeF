@@ -182,6 +182,22 @@ index b67def3..8cf9808 100644
  
    private:
      using PFN_EnumAdapterByGpuPreference =
+diff --git a/OptiScaler/hooks/FG_Hooks.cpp b/OptiScaler/hooks/FG_Hooks.cpp
+index 38a2607..954e743 100644
+--- a/OptiScaler/hooks/FG_Hooks.cpp
++++ b/OptiScaler/hooks/FG_Hooks.cpp
+@@ -102,7 +102,10 @@ static bool CheckForFGStatus()
+         Config::Instance()->FGOutput.set_volatile_value(FGOutput::NoFG);
+         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
+     }
+-    else if (State::Instance().activeFgOutput == FGOutput::DLSSG && !StreamlineProxy::LoadStreamline())
++    else if (State::Instance().activeFgOutput == FGOutput::DLSSG &&
++             !(_stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
++               State::Instance().wh3NativeDlssLastSuccessTick.load(std::memory_order_relaxed) == 0) &&
++             !StreamlineProxy::LoadStreamline())
+     {
+         ImGui::InsertNotification(
+             { ImGuiToastType::Error, 20000, "Can't init DLSSG Output\nAre you missing the streamline folder?" });
 diff --git a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp b/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
 index 68e1b42..d650015 100644
 --- a/OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp
@@ -422,6 +438,30 @@ index 02b63ff..57ae52b 100644
          }
          else if (state.activeFgOutput == FGOutput::FSRFG && !FfxApiProxy::IsFGReady())
          {
+diff --git a/OptiScaler/proxies/Streamline_Proxy.h b/OptiScaler/proxies/Streamline_Proxy.h
+index 6b2eca3..6e81ae2 100644
+--- a/OptiScaler/proxies/Streamline_Proxy.h
++++ b/OptiScaler/proxies/Streamline_Proxy.h
+@@ -69,6 +69,19 @@ class StreamlineProxy
+         if (_dll != nullptr)
+             return true;
+ 
++        // WH3's DLSS5 Feed builds native DLSS on a private D3D12 device. Loading
++        // Streamline during the game's first D3D12 device hook poisoned that
++        // feature creation even when the presenting swapchain was still plain.
++        // Let the native feature evaluate once before loading the interposer.
++        if (_stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
++            State::Instance().activeFgOutput == FGOutput::DLSSG &&
++            State::Instance().wh3NativeDlssLastSuccessTick.load(std::memory_order_relaxed) == 0)
++            return false;
++
++        if (_stricmp(State::Instance().gameExe.c_str(), "Warhammer3.exe") == 0 &&
++            State::Instance().activeFgOutput == FGOutput::DLSSG)
++            LOG_INFO("WH3 DLSSG two-stage: native DLSS ready; Streamline load now permitted");
++
+         auto owner = State::GetOwner();
+         if (State::Instance().activeFgOutput == FGOutput::DLSSG &&
+             State::Instance().activeFgNvngx != FGNvngxReplacement::None)
 diff --git a/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp b/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp
 index c4277ad..fe84da5 100644
 --- a/OptiScaler/with_dx12/dx11_with_dx12_sc.cpp
