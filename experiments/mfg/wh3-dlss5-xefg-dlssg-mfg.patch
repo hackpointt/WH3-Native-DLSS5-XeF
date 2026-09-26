@@ -23,7 +23,7 @@ index 8c37399..e038edf 100644
      bool nukemsFgFileAvailable = false;
      bool artursFgFileAvailable = false;
 diff --git a/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp b/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp
-index 0e25432..099ee75 100644
+index 0e25432..cb900a9 100644
 --- a/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp
 +++ b/OptiScaler/framegen/dlssg/DLSSG_Dx12.cpp
 @@ -51,6 +51,26 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
@@ -53,28 +53,24 @@ index 0e25432..099ee75 100644
      IDXGIFactory* slFactory = nullptr;
      if (!Util::CheckForRealObject(__FUNCTION__, factory, (IUnknown**) &slFactory))
      {
-@@ -62,7 +82,20 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
-         slFactory->Release();
+@@ -89,6 +109,17 @@ bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQue
+         _supportsDMFG = dlssgState.bIsDynamicMFGSupported == sl::Boolean::eTrue;
      }
  
--    StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, true);
-+    // WH3's DLSS5 Feed creates native DLSS on a separate D3D12 device after
-+    // this swapchain. Let that feature finish its first Evaluate before DLSS-G
-+    // activates, so both NGX users do not initialize at the same time.
++    // Keep the Streamline swapchain proxy created above, then pause DLSS-G
++    // while WH3's private DLSS5 Feed device creates and evaluates native DLSS.
++    // The DX11/DX12 present path resumes DLSS-G after that first evaluation.
 +    if (wh3DlssgCompat)
 +    {
 +        const auto deferred = StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, false);
 +        State::Instance().wh3DlssgDeferredActivation.store(deferred == sl::Result::eOk,
 +                                                            std::memory_order_relaxed);
-+        LOG_INFO("WH3 DLSSG deferred activation: disable result {}", (int) deferred);
++        LOG_INFO("WH3 DLSSG deferred activation: disable after swapchain result {}", (int) deferred);
 +    }
-+    else
-+    {
-+        StreamlineProxy::SetFeatureLoaded()(sl::kFeatureDLSS_G, true);
-+    }
- 
-     desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
- 
++
+     _gameCommandQueue = cmdQueue;
+     _swapChain = *swapChain;
+     _hwnd = desc->OutputWindow;
 diff --git a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp b/OptiScaler/framegen/xefg/XeFG_Dx12.cpp
 index a60ca66..287218b 100644
 --- a/OptiScaler/framegen/xefg/XeFG_Dx12.cpp

@@ -48,8 +48,8 @@ Experimental WH3 DLSS-G startup-order candidate
 OptiScaler base: $baseCommit
 The DLSS-G swapchain creation fix previously compiled and created a swapchain,
 but DLSS5 Feed failed during native DLSS CreateFeature while DLSS-G was active.
-This revision disables DLSS-G feature loading until the first successful native
-DLSS Evaluate, then re-enables it on the DX11/DX12 present path.
+This revision creates the Streamline swapchain, pauses DLSS-G until the first
+successful native DLSS Evaluate, then resumes it on the DX11/DX12 present path.
 No 3D game test has been performed for this revision.
 Preserve the existing stable DLSS5 + XeFG baseline when testing.
 "@ | Set-Content -Encoding UTF8 package\README-MFG-EXPERIMENT.txt
